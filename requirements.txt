@@ -1,9 +1,4 @@
 aiogram
 supabase
-easyocr
-opencv-python-headless
-numpy
 requests
 python-dotenv
-torch
-torchvision
