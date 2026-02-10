@@ -42,7 +42,7 @@ EMAIL_REGEX = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
 VALID_KEYWORDS = ["5614", "6847", "07", "ELDOR", "ATAJANOV", "PAYME", "CLICK", "OTKAZMA", "O'TKAZMA"]
 
 # =========================================================================
-# YANGI OCR FUNKSIYASI (API ORQALI)
+# OCR FUNKSIYASI (API ORQALI)
 # =========================================================================
 def get_text_from_api(file_bytes, file_type='jpg'):
     """
@@ -53,9 +53,9 @@ def get_text_from_api(file_bytes, file_type='jpg'):
 
     payload = {
         'apikey': OCR_API_KEY,
-        'language': 'eng', # Yoki 'rus' qilsangiz ham bo'ladi
+        'language': 'eng', 
         'isOverlayRequired': False,
-        'OCREngine': 2 # 2-versiya yaxshiroq o'qiydi
+        'OCREngine': 2 
     }
     
     files = {
@@ -66,11 +66,9 @@ def get_text_from_api(file_bytes, file_type='jpg'):
         response = requests.post('https://api.ocr.space/parse/image', files=files, data=payload)
         result = response.json()
         
-        # Xatolik borligini tekshirish
         if result.get('IsErroredOnProcessing'):
             return ""
         
-        # Natijalarni yig'ish
         parsed_results = result.get('ParsedResults')
         if parsed_results:
             full_text = " ".join([res.get('ParsedText', '') for res in parsed_results])
@@ -87,6 +85,7 @@ def get_text_from_api(file_bytes, file_type='jpg'):
 async def create_user_auto(email, message: Message, state: FSMContext):
     try:
         password = email.split("@")[0]
+        # Supabase da user yaratish
         user = supabase.auth.admin.create_user({
             "email": email,
             "password": password,
@@ -105,6 +104,7 @@ async def create_user_auto(email, message: Message, state: FSMContext):
             f"👇 <b>Bizning yopiq kanalimizga qo'shiling:</b>\n"
             f"https://t.me/+G5z5KWbXBZ04OTAy"
         )
+        # Jarayon tugadi
         await state.set_state(PaymentState.completed)
         
     except Exception as e:
@@ -130,7 +130,7 @@ def is_valid_check(text):
 @dp.message(PaymentState.completed)
 @dp.business_message(PaymentState.completed)
 async def handle_completed_user(message: Message):
-    return 
+    return # Tayyor userga javob bermaymiz
 
 @dp.message(F.text)
 @dp.business_message(F.text)
@@ -138,6 +138,7 @@ async def handle_text(message: Message, state: FSMContext):
     text = message.text
     email_match = re.search(EMAIL_REGEX, text)
     
+    # 1. Agar EMAIL yuborilgan bo'lsa
     if email_match:
         email = email_match.group(0)
         current_state = await state.get_state()
@@ -150,20 +151,30 @@ async def handle_text(message: Message, state: FSMContext):
             await state.set_state(PaymentState.waiting_for_check)
             await message.answer(f"📧 Email ({email}) saqlandi.\nEndi iltimos, to'lov <b>cheki rasmini</b> yuboring.")
             
+    # 2. Agar oddiy xabar yuborilgan bo'lsa
     else:
         is_business = message.business_connection_id is not None
         keywords = ["karta", "to'lov", "narx", "salom", "pro", "sotib", "салом"]
         
         if not is_business or any(word in text.lower() for word in keywords):
+            # 1-Xabar: To'lov ma'lumotlari
             await message.answer(
                 "Assalomu alaykum! Pro versiyani olish uchun to'lov qiling:\n\n"
                 "💳 <b>Karta raqam:</b>\n"
-                "<code>5614 6847 0893 9507</code>\n"
+                "<code>5614684708939507</code>\n"
                 "👤 <b>Eldor Atajanov</b>\n\n"
                 "❗️ To'lovdan so'ng <b>Chek</b> va <b>Emailingizni</b> shu yerga yuboring."
             )
+            
+            # Kichik pauza (chiroyli chiqishi uchun)
+            await asyncio.sleep(0.5)
+            
+            # 2-Xabar: Admin kontakti (ALOHIDA XABAR)
+            await message.answer(
+                "📞 Boshqa masalada savollaringiz bo'lsa @avtotestu_ad2 ga murojat qiling."
+            )
 
-# 2. Mijoz RASM yoki PDF (Chek) tashlaganda
+# 3. Mijoz RASM yoki PDF (Chek) tashlaganda
 @dp.message(F.photo | F.document)
 @dp.business_message(F.photo | F.document)
 async def handle_files(message: Message, state: FSMContext):
@@ -190,9 +201,7 @@ async def handle_files(message: Message, state: FSMContext):
 
         if file_bytes:
             # --- API GA YUBORISH ---
-            # Bu yerda serveringiz qiynalmaydi, API o'zi o'qib beradi
             full_text = await asyncio.to_thread(get_text_from_api, file_bytes, file_type)
-            
             print(f"📄 API dan kelgan matn: {full_text}")
 
             if is_valid_check(full_text):
