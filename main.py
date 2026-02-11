@@ -33,13 +33,32 @@ logging.basicConfig(level=logging.INFO)
 
 # Holatlar (States)
 class PaymentState(StatesGroup):
-    waiting_for_check = State()
-    waiting_for_email = State()
-    completed = State()
+    waiting_for_check = State() # To'lov ma'lumoti berildi, chek kutyapmiz
+    waiting_for_email = State() # Chek oldik, email kutyapmiz
+    completed = State()         # Jarayon tugadi
 
 # Regex va Kalit so'zlar
 EMAIL_REGEX = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-VALID_KEYWORDS = ["5614", "6847", "07", "ELDOR", "ATAJANOV", "PAYME", "CLICK", "OTKAZMA", "O'TKAZMA"]
+
+# Check ichidagi so'zlarni tekshirish uchun (Lotin va Kirill)
+VALID_KEYWORDS = [
+    "5614", "6847", "07", "ELDOR", "ATAJANOV", "PAYME", "CLICK", 
+    "OTKAZMA", "O'TKAZMA", "ЎТКАЗМА", "УТКАЗМА", "ПЕРЕВОД"
+]
+
+# Narx so'ralganda ishlatiladigan so'zlar
+PRICE_KEYWORDS = [
+    "narx", "qancha", "necha", "pul", "som", "so'm", "sum", 
+    "нарх", "қанча", "неча", "пул", "сўм", "сум", "баҳо"
+]
+
+# Salomlashish va to'lov so'ralganda (Start berish)
+PAYMENT_START_KEYWORDS = [
+    "karta", "to'lov", "sotib", "salom", "pro", "obuna", "oylik", "tarif", 
+    "vip", "premium", "start",
+    "карта", "тўлов", "толов", "сотиб", "салом", "про", "обуна", "ойлик", "тариф",
+    "вип", "премиум", "старт"
+]
 
 # =========================================================================
 # OCR FUNKSIYASI (API ORQALI)
@@ -104,7 +123,7 @@ async def create_user_auto(email, message: Message, state: FSMContext):
             f"👇 <b>Bizning yopiq kanalimizga qo'shiling:</b>\n"
             f"https://t.me/+G5z5KWbXBZ04OTAy"
         )
-        # Jarayon tugadi
+        # Jarayon tugadi, holatni completed ga tushiramiz
         await state.set_state(PaymentState.completed)
         
     except Exception as e:
@@ -127,37 +146,63 @@ def is_valid_check(text):
 # BOT LOGIKASI
 # =========================================================================
 
-@dp.message(PaymentState.completed)
-@dp.business_message(PaymentState.completed)
-async def handle_completed_user(message: Message):
-    return # Tayyor userga javob bermaymiz
+# Agar user completed holatida bo'lsa va yana yozsa, uni "noldan" boshlatishimiz mumkin
+# yoki jim turishimiz mumkin. Hozircha jim turishni afzal ko'ramiz, 
+# lekin kalit so'z yozsa reaksiya bildiramiz.
 
 @dp.message(F.text)
 @dp.business_message(F.text)
 async def handle_text(message: Message, state: FSMContext):
-    text = message.text
-    email_match = re.search(EMAIL_REGEX, text)
+    text = message.text.lower() # Hammasini kichik harf qilamiz
+    email_match = re.search(EMAIL_REGEX, message.text) # Original textdan email qidiramiz
     
-    # 1. Agar EMAIL yuborilgan bo'lsa
+    current_state = await state.get_state()
+
+    # ---------------------------------------------------------
+    # 1. EMAIL TEKSHIRISH (Eng yuqori ustuvorlik)
+    # ---------------------------------------------------------
     if email_match:
         email = email_match.group(0)
-        current_state = await state.get_state()
         
+        # Agar biz email kutayotgan bo'lsak
         if current_state == PaymentState.waiting_for_email:
             await message.answer(f"📧 Email qabul qilindi: {email}. User ochilmoqda...")
             await create_user_auto(email, message, state)
+            return
+
+        # Agar biz hali hech narsa kutmayotgan bo'lsak yoki chek kutayotgan bo'lsak
         else:
             await state.update_data(email=email)
             await state.set_state(PaymentState.waiting_for_check)
             await message.answer(f"📧 Email ({email}) saqlandi.\nEndi iltimos, to'lov <b>cheki rasmini</b> yuboring.")
-            
-    # 2. Agar oddiy xabar yuborilgan bo'lsa
-    else:
-        is_business = message.business_connection_id is not None
-        keywords = ["karta", "to'lov", "narx", "salom", "pro", "sotib", "салом"]
+            return
+
+    # ---------------------------------------------------------
+    # 2. NARX SO'RASH (Har doim javob beradi)
+    # ---------------------------------------------------------
+    if any(word in text for word in PRICE_KEYWORDS):
+        await message.answer(
+            "💰 <b>Avtotest Pro narxlari:</b>\n\n"
+            "• 1 haftalik: <b>15,000 so'm</b>\n"
+            "• 1 oylik: <b>33,000 so'm</b>\n"
+            "• 3 oylik: <b>83,000 so'm</b>\n\n"
+            "Sotib olish uchun karta raqam so'rang yoki shunchaki 'to'lov' deb yozing."
+        )
+        return
+
+    # ---------------------------------------------------------
+    # 3. TO'LOV / SALOM / START (Faqat 1 marta javob beradi)
+    # ---------------------------------------------------------
+    is_business = message.business_connection_id is not None
+    
+    # Agar so'zlar ichida "to'lov", "salom" va h.k. bo'lsa
+    if not is_business or any(word in text for word in PAYMENT_START_KEYWORDS):
         
-        if not is_business or any(word in text.lower() for word in keywords):
-            # 1-Xabar: To'lov ma'lumotlari
+        # MANTIQ: Agar foydalanuvchi allaqachon jarayonni boshlagan bo'lsa (waiting_for_check),
+        # unga qayta-qayta karta raqam tashlamaymiz.
+        # Faqat holati "None" (yangi) yoki "Completed" (tugatgan) bo'lsagina tashlaymiz.
+        
+        if current_state is None or current_state == PaymentState.completed:
             await message.answer(
                 "Assalomu alaykum! Pro versiyani olish uchun to'lov qiling:\n\n"
                 "💳 <b>Karta raqam:</b>\n"
@@ -166,18 +211,25 @@ async def handle_text(message: Message, state: FSMContext):
                 "❗️ To'lovdan so'ng <b>Chek</b> va <b>Emailingizni</b> shu yerga yuboring."
             )
             
-            # Kichik pauza (chiroyli chiqishi uchun)
             await asyncio.sleep(0.5)
             
-            # 2-Xabar: Admin kontakti (ALOHIDA XABAR)
             await message.answer(
                 "📞 Boshqa masalada savollaringiz bo'lsa @avtotestu_ad2 ga murojat qiling."
             )
+            
+            # Holatni "Chek kutish"ga o'tkazamiz. 
+            # Endi user qayta "salom" desa, bu if ga kirmaydi.
+            await state.set_state(PaymentState.waiting_for_check)
+        
+        return
 
-# 3. Mijoz RASM yoki PDF (Chek) tashlaganda
+# ---------------------------------------------------------
+# 4. RASM YOKI PDF (CHEK) QABUL QILISH
+# ---------------------------------------------------------
 @dp.message(F.photo | F.document)
 @dp.business_message(F.photo | F.document)
 async def handle_files(message: Message, state: FSMContext):
+    # Har qanday rasm kelsa reaksiya bildiramiz (lekin holatni tekshirish mumkin)
     msg = await message.answer("⏳ Chek tekshirilmoqda, iltimos kuting...")
     
     file_bytes = None
