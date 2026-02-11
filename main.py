@@ -186,7 +186,7 @@ async def handle_text(message: Message, state: FSMContext):
             "• 1 haftalik: <b>15,000 so'm</b>\n"
             "• 1 oylik: <b>33,000 so'm</b>\n"
             "• 3 oylik: <b>83,000 so'm</b>\n\n"
-            "Sotib olish uchun karta raqam so'rang yoki shunchaki 'to'lov' deb yozing."
+            
         )
         return
 
