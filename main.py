@@ -2,7 +2,7 @@ import asyncio
 import os
 import re
 import logging
-import requests
+import requests  # API ga ulanish uchun
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.client.default import DefaultBotProperties
@@ -13,9 +13,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-# =========================================================================
-# 1. SOZLAMALARNI YUKLASH
-# =========================================================================
+# 1. Sozlamalarni yuklash
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -32,31 +30,30 @@ dp = Dispatcher(storage=storage)
 
 logging.basicConfig(level=logging.INFO)
 
-# =========================================================================
-# HOLATLAR VA KALIT SO'ZLAR
-# =========================================================================
-
+# Holatlar (States)
 class PaymentState(StatesGroup):
-    waiting_for_check = State() 
-    waiting_for_email = State() 
-    completed = State()        
+    waiting_for_check = State() # To'lov ma'lumoti berildi, chek kutyapmiz
+    waiting_for_email = State() # Chek oldik, email kutyapmiz
+    completed = State()         # Jarayon tugadi
 
+# Regex va Kalit so'zlar
 EMAIL_REGEX = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
 
-PRICE_KEYWORDS = [
-    "narx", "qancha", "necha", "pul", "som", "so'm", "sum", "bahosi", "obuna", "tarif", "pro", "vip", "premium",
-    "нарх", "қанча", "неча", "пул", "сўм", "сум", "баҳо", "обуна", "тариф", "про", "вип", "премиум"
-]
-
+# Check ichidagi so'zlarni tekshirish uchun (Lotin va Kirill)
 VALID_KEYWORDS = [
     "5614", "6847", "07", "ELDOR", "ATAJANOV", "PAYME", "CLICK", 
     "OTKAZMA", "O'TKAZMA", "ЎТКАЗМА", "УТКАЗМА", "ПЕРЕВОД"
 ]
 
-# =========================================================================
-# YORDAMCHI FUNKSIYALAR
-# =========================================================================
+# Narx so'ralganda ishlatiladigan so'zlar
+PRICE_KEYWORDS = [
+    "narx", "qancha", "necha", "pul", "som", "so'm", "sum", 
+    "нарх", "қанча", "неча", "пул", "сўм", "сум", "баҳо"
+]
 
+# =========================================================================
+# OCR FUNKSIYASI (API ORQALI)
+# =========================================================================
 def get_text_from_api(file_bytes, file_type='jpg'):
     """Rasm yoki PDF baytlarini OCR.space API ga yuboradi va matnni qaytaradi."""
     filename = 'file.pdf' if file_type == 'pdf' else 'file.jpg'
@@ -74,7 +71,8 @@ def get_text_from_api(file_bytes, file_type='jpg'):
     }
 
     try:
-        response = requests.post('https://api.ocr.space/parse/image', files=files, data=payload)
+        # XATOLIK SHU YERDA EDI: timeout qo'shildi! API javobini uzoq kutib qotib qolmaydi.
+        response = requests.post('https://api.ocr.space/parse/image', files=files, data=payload, timeout=25)
         result = response.json()
         
         if result.get('IsErroredOnProcessing'):
@@ -85,12 +83,18 @@ def get_text_from_api(file_bytes, file_type='jpg'):
             full_text = " ".join([res.get('ParsedText', '') for res in parsed_results])
             return full_text
         return ""
+    except requests.exceptions.Timeout:
+        print("API Xatolik: Vaqt tugadi (Timeout)")
+        return ""
     except Exception as e:
         print(f"API Xatolik: {e}")
         return ""
 
+# =========================================================================
+# YORDAMCHI FUNKSIYALAR
+# =========================================================================
+
 async def create_user_auto(email, message: Message, state: FSMContext):
-    """Supabase orqali user yaratish va xabar yuborish"""
     try:
         password = email.split("@")[0]
         # Supabase da user yaratish
@@ -132,31 +136,25 @@ def is_valid_check(text):
     return False
 
 # =========================================================================
-# ASOSIY MATNLI XABARLAR ISHLOVCHISI
+# BOT LOGIKASI (SIZNING ASL KODINGIZ ASOSIDA)
 # =========================================================================
 
 @dp.message(F.text)
 @dp.business_message(F.text)
 async def handle_text(message: Message, state: FSMContext):
-    text = message.text.lower() # Hammasini kichik harf qilamiz
-    email_match = re.search(EMAIL_REGEX, message.text) # Original textdan email qidiramiz
+    text = message.text.lower() 
+    email_match = re.search(EMAIL_REGEX, message.text) 
     
     current_state = await state.get_state()
-    user_data = await state.get_data()
-    price_sent = user_data.get("price_sent", False)
 
-    # ---------------------------------------------------------
-    # 1. EMAIL TEKSHIRISH (Eng yuqori ustuvorlik)
-    # ---------------------------------------------------------
+    # 1. EMAIL TEKSHIRISH
     if email_match:
         email = email_match.group(0)
         
-        # Agar biz email kutayotgan bo'lsak
         if current_state == PaymentState.waiting_for_email:
             await message.answer(f"📧 Email qabul qilindi: {email}. User ochilmoqda...")
             await create_user_auto(email, message, state)
             return
-        # Agar biz hali hech narsa kutmayotgan bo'lsak yoki chek kutayotgan bo'lsak
         else:
             await state.update_data(email=email)
             if current_state != PaymentState.completed:
@@ -164,27 +162,18 @@ async def handle_text(message: Message, state: FSMContext):
             await message.answer(f"📧 Email ({email}) saqlandi.\nEndi iltimos, to'lov <b>cheki rasmini</b> yuboring.")
             return
 
-    # ---------------------------------------------------------
-    # 2. NARX VA TARIFLAR (FAQAT BIR MARTA YUBORILADI)
-    # ---------------------------------------------------------
+    # 2. NARX SO'RASH
     if any(word in text for word in PRICE_KEYWORDS):
-        if not price_sent:
-            await message.answer(
-                "💰 <b>Avtotest Pro narxlari:</b>\n\n"
-                "• 1 haftalik: <b>15,000 so'm</b>\n"
-                "• 1 oylik: <b>33,000 so'm</b>\n"
-                "• 3 oylik: <b>83,000 so'm</b>\n\n"
-            )
-            await state.update_data(price_sent=True)
-            if current_state is None:
-                await state.set_state(PaymentState.waiting_for_check)
+        await message.answer(
+            "💰 <b>Avtotest Pro narxlari:</b>\n\n"
+            "• 1 haftalik: <b>15,000 so'm</b>\n"
+            "• 1 oylik: <b>33,000 so'm</b>\n"
+            "• 3 oylik: <b>83,000 so'm</b>\n\n"
+        )
         return
 
-    # ---------------------------------------------------------
-    # 3. KARTA MA'LUMOTI VA ADMIN XABARI (Birinchi marta yozganda)
-    # ---------------------------------------------------------
+    # 3. KARTA VA ADMIN XABARI (FAQAT BIR MARTA CHIQADI)
     if current_state is None:
-        # Birinchi xabar: Karta
         await message.answer(
             "Assalomu alaykum! Pro versiyani olish uchun to'lov qiling:\n\n"
             "💳 <b>Karta raqam:</b>\n"
@@ -192,28 +181,21 @@ async def handle_text(message: Message, state: FSMContext):
             "👤 <b>Eldor Atajanov</b>\n\n"
             "❗️ To'lovdan so'ng <b>Chek</b> va <b>Emailingizni</b> shu yerga yuboring."
         )
-        
         await asyncio.sleep(0.5)
-        
-        # Ikkinchi xabar: Adminni kutish
         await message.answer(
             "Boshqa masalada savollaringiz bo'lsa yozib qoldiring hamda adminning javobini kutishingizni iltimos qilamiz. 👨‍💻"
         )
         
-        # Holatni o'zgartiramiz
+        # Holatni o'zgartiramiz, endi bu xabar qayta chiqmaydi va bot JIM turadi.
         await state.set_state(PaymentState.waiting_for_check)
         return
 
-    # ---------------------------------------------------------
-    # 4. JIM TURISH REJIMI
-    # ---------------------------------------------------------
-    # Kod shu yerga yetib kelsa, demak user shunchaki gapiryapti. Bot mutlaqo jim turadi.
+    # 4. JIM TURISH REJIMI (Qolgan barcha matnlar e'tiborsiz qoldiriladi)
     return
 
-# =========================================================================
-# FAYLLARNI QABUL QILISH (CHEK)
-# =========================================================================
-
+# ---------------------------------------------------------
+# 4. RASM YOKI PDF (CHEK) QABUL QILISH (ASL HOLATDA QOLDIRILDI)
+# ---------------------------------------------------------
 @dp.message(F.photo | F.document)
 @dp.business_message(F.photo | F.document)
 async def handle_files(message: Message, state: FSMContext):
@@ -262,10 +244,7 @@ async def handle_files(message: Message, state: FSMContext):
         print(f"Xatolik: {e}")
         await msg.edit_text("❌ Tizimda xatolik yuz berdi.")
 
-# =========================================================================
-# ISHGA TUSHIRISH
-# =========================================================================
-
+# --- ISHGA TUSHIRISH ---
 async def main():
     print("🤖 Avtotest Smart Bot ishga tushdi!")
     await bot.delete_webhook(drop_pending_updates=True)
