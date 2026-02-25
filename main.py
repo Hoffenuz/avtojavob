@@ -13,7 +13,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-# 1. Sozlamalarni yuklash
+# =========================================================================
+# 1. SOZLAMALARNI YUKLASH
+# =========================================================================
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -46,44 +48,88 @@ PRICE_KEYWORDS = [
     "нарх", "қанча", "неча", "пул", "сўм", "сум", "баҳо", "обуна", "тариф", "про", "вип", "премиум"
 ]
 
-VALID_KEYWORDS = ["5614", "6847", "07", "ELDOR", "ATAJANOV", "PAYME", "CLICK", "O'TKAZMA", "ЎТКАЗМА", "ПЕРЕВОД"]
+VALID_KEYWORDS = [
+    "5614", "6847", "07", "ELDOR", "ATAJANOV", "PAYME", "CLICK", 
+    "OTKAZMA", "O'TKAZMA", "ЎТКАЗМА", "УТКАЗМА", "ПЕРЕВОД"
+]
 
 # =========================================================================
 # YORDAMCHI FUNKSIYALAR
 # =========================================================================
 
 def get_text_from_api(file_bytes, file_type='jpg'):
+    """Rasm yoki PDF baytlarini OCR.space API ga yuboradi va matnni qaytaradi."""
     filename = 'file.pdf' if file_type == 'pdf' else 'file.jpg'
-    payload = {'apikey': OCR_API_KEY, 'language': 'eng', 'OCREngine': 2}
-    files = {'file': (filename, file_bytes, 'application/pdf' if file_type == 'pdf' else 'image/jpeg')}
+    mime_type = 'application/pdf' if file_type == 'pdf' else 'image/jpeg'
+
+    payload = {
+        'apikey': OCR_API_KEY,
+        'language': 'eng', 
+        'isOverlayRequired': False,
+        'OCREngine': 2 
+    }
+    
+    files = {
+        'file': (filename, file_bytes, mime_type)
+    }
+
     try:
         response = requests.post('https://api.ocr.space/parse/image', files=files, data=payload)
         result = response.json()
-        if result.get('ParsedResults'):
-            return " ".join([res.get('ParsedText', '') for res in result['ParsedResults']])
+        
+        if result.get('IsErroredOnProcessing'):
+            return ""
+        
+        parsed_results = result.get('ParsedResults')
+        if parsed_results:
+            full_text = " ".join([res.get('ParsedText', '') for res in parsed_results])
+            return full_text
         return ""
     except Exception as e:
-        logging.error(f"OCR API Error: {e}")
+        print(f"API Xatolik: {e}")
         return ""
 
 async def create_user_auto(email, message: Message, state: FSMContext):
+    """Supabase orqali user yaratish va xabar yuborish"""
     try:
         password = email.split("@")[0]
-        supabase.auth.admin.create_user({"email": email, "password": password, "email_confirm": True})
+        # Supabase da user yaratish
+        user = supabase.auth.admin.create_user({
+            "email": email,
+            "password": password,
+            "email_confirm": True
+        })
         
         await message.answer(
-            f"✅ <b>To'lov tasdiqlandi! Profil yaratildi:</b>\n\n"
+            f"✅ <b>To'lov tasdiqlandi!</b>\n\n"
+            f"Sizning profilingiz yaratildi:\n"
             f"📧 <b>Login:</b> <code>{email}</code>\n"
             f"🔑 <b>Parol:</b> <code>{password}</code>\n\n"
-            f"👇 <b>Yopiq kanalimizga qo'shiling:</b>\nhttps://t.me/+G5z5KWbXBZ04OTAy"
+            f"Saytga kirib bemalol foydalanishingiz mumkin."
         )
+        await asyncio.sleep(0.5)
+        await message.answer(
+            f"👇 <b>Bizning yopiq kanalimizga qo'shiling:</b>\n"
+            f"https://t.me/+G5z5KWbXBZ04OTAy"
+        )
+        # Jarayon tugadi, holatni completed ga tushiramiz
         await state.set_state(PaymentState.completed)
+        
     except Exception as e:
-        if "already registered" in str(e):
-            await message.answer(f"⚠️ Bu email ({email}) allaqachon mavjud.\nKanal: https://t.me/+G5z5KWbXBZ04OTAy")
+        error_text = str(e)
+        if "already registered" in error_text:
+            await message.answer(f"⚠️ Bu email ({email}) allaqachon ro'yxatdan o'tgan.")
+            await message.answer("Kanalimiz: https://t.me/+G5z5KWbXBZ04OTAy")
             await state.set_state(PaymentState.completed)
         else:
-            await message.answer(f"❌ Xatolik: {str(e)}")
+            await message.answer(f"❌ Xatolik yuz berdi: {error_text}")
+
+def is_valid_check(text):
+    text = text.upper()
+    for word in VALID_KEYWORDS:
+        if word in text:
+            return True
+    return False
 
 # =========================================================================
 # ASOSIY MATNLI XABARLAR ISHLOVCHISI
@@ -92,50 +138,53 @@ async def create_user_auto(email, message: Message, state: FSMContext):
 @dp.message(F.text)
 @dp.business_message(F.text)
 async def handle_text(message: Message, state: FSMContext):
-    text = message.text.lower()
-    email_match = re.search(EMAIL_REGEX, message.text)
-    current_state = await state.get_state()
+    text = message.text.lower() # Hammasini kichik harf qilamiz
+    email_match = re.search(EMAIL_REGEX, message.text) # Original textdan email qidiramiz
     
-    # User ma'lumotlarini olish (narx yuborilganmi yoki yo'qligini tekshirish uchun)
+    current_state = await state.get_state()
     user_data = await state.get_data()
     price_sent = user_data.get("price_sent", False)
 
-    # 1. EMAIL TEKSHIRISH (Har doim birinchi o'rinda)
+    # ---------------------------------------------------------
+    # 1. EMAIL TEKSHIRISH (Eng yuqori ustuvorlik)
+    # ---------------------------------------------------------
     if email_match:
         email = email_match.group(0)
+        
+        # Agar biz email kutayotgan bo'lsak
         if current_state == PaymentState.waiting_for_email:
-            await message.answer(f"📧 Email qabul qilindi. Profil ochilmoqda...")
+            await message.answer(f"📧 Email qabul qilindi: {email}. User ochilmoqda...")
             await create_user_auto(email, message, state)
+            return
+        # Agar biz hali hech narsa kutmayotgan bo'lsak yoki chek kutayotgan bo'lsak
         else:
             await state.update_data(email=email)
             if current_state != PaymentState.completed:
                 await state.set_state(PaymentState.waiting_for_check)
-            await message.answer(f"📧 Email ({email}) saqlandi. Endi to'lov cheki rasmini yuboring.")
-        return
+            await message.answer(f"📧 Email ({email}) saqlandi.\nEndi iltimos, to'lov <b>cheki rasmini</b> yuboring.")
+            return
 
+    # ---------------------------------------------------------
     # 2. NARX VA TARIFLAR (FAQAT BIR MARTA YUBORILADI)
+    # ---------------------------------------------------------
     if any(word in text for word in PRICE_KEYWORDS):
         if not price_sent:
             await message.answer(
                 "💰 <b>Avtotest Pro narxlari:</b>\n\n"
                 "• 1 haftalik: <b>15,000 so'm</b>\n"
                 "• 1 oylik: <b>33,000 so'm</b>\n"
-                "• 3 oylik: <b>83,000 so'm</b>"
+                "• 3 oylik: <b>83,000 so'm</b>\n\n"
             )
-            # Narx yuborilganini belgilab qo'yamiz
             await state.update_data(price_sent=True)
-            # Agar hali state None bo'lsa, uni waiting_for_check ga o'tkazamiz
             if current_state is None:
                 await state.set_state(PaymentState.waiting_for_check)
-        else:
-            # Agar narx allaqachon yuborilgan bo'lsa
-            await message.answer(
-                "Boshqa masalada savollaringiz bo'lsa yozib qoldiring hamda adminning javobini kutishingizni iltimos qilamiz. 👨‍💻"
-            )
         return
 
-    # 3. KARTA MA'LUMOTI (Faqat birinchi marta yozganda)
+    # ---------------------------------------------------------
+    # 3. KARTA MA'LUMOTI VA ADMIN XABARI (Birinchi marta yozganda)
+    # ---------------------------------------------------------
     if current_state is None:
+        # Birinchi xabar: Karta
         await message.answer(
             "Assalomu alaykum! Pro versiyani olish uchun to'lov qiling:\n\n"
             "💳 <b>Karta raqam:</b>\n"
@@ -143,51 +192,79 @@ async def handle_text(message: Message, state: FSMContext):
             "👤 <b>Eldor Atajanov</b>\n\n"
             "❗️ To'lovdan so'ng <b>Chek</b> va <b>Emailingizni</b> shu yerga yuboring."
         )
-        await state.set_state(PaymentState.waiting_for_check)
-        return
-
-    # 4. DEFAULT: ADMIN XABARI
-    if current_state != PaymentState.completed:
+        
+        await asyncio.sleep(0.5)
+        
+        # Ikkinchi xabar: Adminni kutish
         await message.answer(
             "Boshqa masalada savollaringiz bo'lsa yozib qoldiring hamda adminning javobini kutishingizni iltimos qilamiz. 👨‍💻"
         )
+        
+        # Holatni o'zgartiramiz
+        await state.set_state(PaymentState.waiting_for_check)
+        return
+
+    # ---------------------------------------------------------
+    # 4. JIM TURISH REJIMI
+    # ---------------------------------------------------------
+    # Kod shu yerga yetib kelsa, demak user shunchaki gapiryapti. Bot mutlaqo jim turadi.
+    return
 
 # =========================================================================
-# FAYLLARNI QABUL QILISH
+# FAYLLARNI QABUL QILISH (CHEK)
 # =========================================================================
 
 @dp.message(F.photo | F.document)
 @dp.business_message(F.photo | F.document)
 async def handle_files(message: Message, state: FSMContext):
     msg = await message.answer("⏳ Chek tekshirilmoqda, iltimos kuting...")
-    file_bytes, file_type = None, 'jpg'
+    
+    file_bytes = None
+    file_type = 'jpg'
 
     try:
+        # --- Faylni yuklab olish ---
         if message.photo:
-            file = await bot.get_file(message.photo[-1].file_id)
-            file_bytes = (await bot.download_file(file.file_path)).read()
+            file_id = message.photo[-1].file_id
+            file = await bot.get_file(file_id)
+            downloaded_file = await bot.download_file(file.file_path)
+            file_bytes = downloaded_file.read()
+            file_type = 'jpg'
+            
         elif message.document and message.document.file_name.lower().endswith('.pdf'):
-            file = await bot.get_file(message.document.file_id)
-            file_bytes = (await bot.download_file(file.file_path)).read()
+            file_id = message.document.file_id
+            file = await bot.get_file(file_id)
+            downloaded_file = await bot.download_file(file.file_path)
+            file_bytes = downloaded_file.read()
             file_type = 'pdf'
 
         if file_bytes:
+            # --- API GA YUBORISH ---
             full_text = await asyncio.to_thread(get_text_from_api, file_bytes, file_type)
-            if any(word in full_text.upper() for word in VALID_KEYWORDS):
+            print(f"📄 API dan kelgan matn: {full_text}")
+
+            if is_valid_check(full_text):
                 data = await state.get_data()
-                email = data.get("email")
-                if email:
+                saved_email = data.get("email")
+                
+                if saved_email:
                     await msg.edit_text("✅ Chek tasdiqlandi! User yaratilmoqda...")
-                    await create_user_auto(email, message, state)
+                    await create_user_auto(saved_email, message, state)
                 else:
                     await state.set_state(PaymentState.waiting_for_email)
-                    await msg.edit_text("✅ Chek qabul qilindi!\nEndi user ochish uchun <b>Email manzilingizni</b> yuboring.")
+                    await msg.edit_text("✅ Chek qabul qilindi!\nEndi user ochish uchun <b>Email manzilingizni</b> yozib yuboring.")
             else:
-                await msg.edit_text("⚠️ Chekni o'qib bo'lmadi yoki xato chek.\nIltimos, tiniqroq rasm yuboring.")
+                await msg.edit_text("⚠️ Chekni o'qib bo'lmadi yoki noto'g'ri chek.\nIltimos, tiniqroq rasm yuboring.")
         else:
-            await msg.edit_text("⚠️ Faqat rasm yoki PDF qabul qilinadi.")
+             await msg.edit_text("⚠️ Faqat Rasm yoki PDF formatidagi chek qabul qilinadi.")
+
     except Exception as e:
-        await msg.edit_text("❌ Xatolik yuz berdi.")
+        print(f"Xatolik: {e}")
+        await msg.edit_text("❌ Tizimda xatolik yuz berdi.")
+
+# =========================================================================
+# ISHGA TUSHIRISH
+# =========================================================================
 
 async def main():
     print("🤖 Avtotest Smart Bot ishga tushdi!")
