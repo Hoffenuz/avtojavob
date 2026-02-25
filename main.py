@@ -54,7 +54,7 @@ PRICE_KEYWORDS = [
 
 # Salomlashish va to'lov so'ralganda (Start berish)
 PAYMENT_START_KEYWORDS = [
-    "karta", "to'lov", "sotib", "salom", "pro", "obuna", "oylik", "tarif", 
+    "karta", "to'lov", "sotib", "salom", "pro", "obuna", "oylik", "tarif" "qancha" "narx", 
     "vip", "premium", "start",
     "карта", "тўлов", "толов", "сотиб", "салом", "про", "обуна", "ойлик", "тариф",
     "вип", "премиум", "старт"
@@ -214,7 +214,7 @@ async def handle_text(message: Message, state: FSMContext):
             await asyncio.sleep(0.5)
             
             await message.answer(
-                "📞 Boshqa masalada savollaringiz bo'lsa @avtotestu_ad2 ga murojat qiling."
+                "📞 Boshqa masalada savollaringiz bo'lsa iltimos admin javobini kuting."
             )
             
             # Holatni "Chek kutish"ga o'tkazamiz. 
