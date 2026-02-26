@@ -20,7 +20,7 @@ from supabase import create_client, Client
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-# DIQQAT: Bu yerda albatta SERVICE_ROLE_KEY bo'lishi shart, aks holda parol o'zgartirib bo'lmaydi!
+# DIQQAT: Bu yerda albatta SERVICE_ROLE_KEY bo'lishi shart!
 SUPABASE_KEY = os.getenv("SUPABASE_KEY") 
 OCR_API_KEY = "K87990866288957"
 
@@ -43,7 +43,7 @@ VALID_KEYWORDS = ["5614", "6847", "07", "ELDOR", "ATAJANOV", "PAYME", "CLICK", "
 PRICE_KEYWORDS = ["narx", "qancha", "necha", "pul", "som", "so'm", "sum", "нарх", "қанча", "неча", "пул", "сўм", "сум"]
 
 # =========================================================================
-# 2. OCR FUNKSIYASI (API)
+# 2. OCR FUNKSIYASI (Eng barqaror versiya)
 # =========================================================================
 def get_text_from_api(file_bytes, file_type='jpg'):
     filename = 'file.pdf' if file_type == 'pdf' else 'file.jpg'
@@ -53,21 +53,28 @@ def get_text_from_api(file_bytes, file_type='jpg'):
         'apikey': OCR_API_KEY,
         'language': 'eng',
         'isOverlayRequired': 'false',
-        'OCREngine': '2' 
+        'OCREngine': '1'  # 1-motor eng barqarori hisoblanadi
     }
     
     files = {'file': (filename, file_bytes, mime_type)}
 
     try:
-        response = requests.post('https://api.ocr.space/parse/image', files=files, data=payload, timeout=30)
+        # Timeout 45 soniyaga oshirildi (qotib qolmasligi uchun)
+        response = requests.post('https://api.ocr.space/parse/image', files=files, data=payload, timeout=45)
         response.raise_for_status()
         result = response.json()
         
+        # Server ichki xatolarini ushlash
+        if result.get('IsErroredOnProcessing'):
+            error_msg = result.get('ErrorMessage', ['Noma\'lum xato'])[0]
+            logging.error(f"OCR ichki xatosi: {error_msg}")
+            return "ERROR_API"
+            
         if result.get('ParsedResults'):
             return " ".join([res.get('ParsedText', '') for res in result['ParsedResults']])
         return ""
     except Exception as e:
-        logging.error(f"OCR Error: {e}")
+        logging.error(f"OCR ulanish xatosi: {e}")
         return "ERROR_API"
 
 # =========================================================================
@@ -112,7 +119,6 @@ async def create_user_auto(email: str, tariff_days: int, message: Message, state
             
             # Agar foydalanuvchi bazada bor bo'lsa (Google orqali kirgan yoki eski user)
             if "already" in error_msg and "registered" in error_msg:
-                
                 # B. Profil ID sini topamiz
                 profile_resp = supabase.table("profiles").select("id").eq("email", email).execute()
                 
@@ -220,7 +226,7 @@ async def handle_files(message: Message, state: FSMContext):
             full_text = await asyncio.to_thread(get_text_from_api, file_bytes, file_type)
             
             if full_text == "ERROR_API":
-                await msg.edit_text("❌ OCR serveri javob bermadi. Iltimos, bir ozdan so'ng qayta yuboring.")
+                await msg.edit_text("❌ OCR serveri muammosi: Server band yoki rasm formati to'g'ri kelmadi.\n\nIltimos, qaytadan yuborib ko'ring.")
                 return
 
             is_valid = any(word in full_text.upper() for word in VALID_KEYWORDS)
