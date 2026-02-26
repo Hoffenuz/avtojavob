@@ -3,6 +3,7 @@ import os
 import re
 import logging
 import requests
+from datetime import datetime, timezone
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.client.default import DefaultBotProperties
@@ -19,7 +20,8 @@ from supabase import create_client, Client
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY") # BU YERDA SERVICE_ROLE_KEY BO'LISHI SHART!
+# DIQQAT: Bu yerda albatta SERVICE_ROLE_KEY bo'lishi shart, aks holda parol o'zgartirib bo'lmaydi!
+SUPABASE_KEY = os.getenv("SUPABASE_KEY") 
 OCR_API_KEY = "K87990866288957"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -85,53 +87,65 @@ def calculate_tariff_days(text: str) -> int:
                 return 93
         except:
             continue
-            
+    # Xatolik yoki summa topilmasa 7 kun beriladi
     return 7 
 
 # =========================================================================
-# 4. USER YARATISH YOKI YANGILASH
+# 4. USER YARATISH YOKI YANGILASH (To'liq aqlli versiya)
 # =========================================================================
 async def create_user_auto(email: str, tariff_days: int, message: Message, state: FSMContext):
     try:
         password = email.split("@")[0]
-        is_new_user = True
+        user_id = None
         
         # A. Supabase Auth orqali yaratishga urinish
         try:
-            supabase.auth.admin.create_user({
+            response = supabase.auth.admin.create_user({
                 "email": email,
                 "password": password,
                 "email_confirm": True
             })
-            await asyncio.sleep(1) # SQL trigger ishlashi uchun biroz kutish
+            user_id = response.user.id
+            await asyncio.sleep(1.5) # SQL trigger ishlashi uchun biroz kutish
         except Exception as e:
             error_msg = str(e).lower()
-            # Agar email bazada bor bo'lsa, xatoni ushlab, odamni eski user deb belgilaymiz
+            
+            # Agar foydalanuvchi bazada bor bo'lsa (Google orqali kirgan yoki eski user)
             if "already" in error_msg and "registered" in error_msg:
-                is_new_user = False
+                
+                # B. Profil ID sini topamiz
+                profile_resp = supabase.table("profiles").select("id").eq("email", email).execute()
+                
+                if profile_resp.data:
+                    user_id = profile_resp.data[0]["id"]
+                    
+                    # C. ENG MUHIMI: Unga majburiy parol o'rnatamiz!
+                    supabase.auth.admin.update_user_by_id(
+                        user_id, 
+                        {"password": password}
+                    )
+                else:
+                    raise Exception("Profil topilmadi. Adminga murojaat qiling.")
             else:
                 raise e # Jiddiy xato bo'lsa, jarayonni to'xtatadi
 
-        # B. Bazaga kunlarni yozish (Yangi bo'lsa ham, eski bo'lsa ham ustidan yozib qo'yadi)
-        supabase.table("profiles").update({
-            "tariff_days": tariff_days,
-            "is_trial_used": True
-        }).eq("email", email).execute()
+        # D. Bazaga kunlarni va HOZIRGI VAQTNI yozish (Trial muammosini yo'q qiladi)
+        current_time = datetime.now(timezone.utc).isoformat()
         
-        # C. Foydalanuvchiga javob yuborish
-        if is_new_user:
-            await message.answer(
-                f"✅ <b>To'lov tasdiqlandi!</b>\n\nProfilingiz yaratildi va PRO aktivlashdi:\n"
-                f"📧 <b>Login:</b> <code>{email}</code>\n"
-                f"🔑 <b>Parol:</b> <code>{password}</code>\n\n"
-                f"Saytga kirib to'liq testlardan foydalanishingiz mumkin."
-            )
-        else:
-            await message.answer(
-                f"✅ <b>To'lov tasdiqlandi!</b>\n\nSizning mavjud profilingizga PRO tarif qo'shildi!\n"
-                f"📧 <b>Email:</b> <code>{email}</code>\n\n"
-                f"Saytga kirib bemalol foydalanishingiz mumkin."
-            )
+        if user_id:
+            supabase.table("profiles").update({
+                "tariff_days": tariff_days,
+                "tariff_start_date": current_time, # Vaqtni aynan hozirgiga yangilash
+                "is_trial_used": True
+            }).eq("id", user_id).execute()
+
+        # E. Foydalanuvchiga yagona tushunarli xabar
+        await message.answer(
+            f"✅ <b>To'lov tasdiqlandi!</b>\n\nProfilingiz PRO tarifga o'tkazildi:\n"
+            f"📧 <b>Login:</b> <code>{email}</code>\n"
+            f"🔑 <b>Parol:</b> <code>{password}</code>\n\n"
+            f"Saytga avvalgidek <b>Google orqali</b> YOKI yuqoridagi <b>Login/Parol</b> bilan bemalol kira olasiz."
+        )
             
         await asyncio.sleep(0.5)
         await message.answer("👇 <b>Yopiq kanalimiz:</b>\nhttps://t.me/+G5z5KWbXBZ04OTAy")
