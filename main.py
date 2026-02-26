@@ -3,6 +3,7 @@ import os
 import re
 import logging
 import requests
+import base64  # <--- YANGI QO'SHILDI
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.client.default import DefaultBotProperties
@@ -16,17 +17,13 @@ from datetime import datetime, timezone
 
 # =========================================================================
 # 1. SOZLAMALAR VA BAZAGA ULANISH
-
 # =========================================================================
-# 1AGA ULANISH
-# =========================================================================
-from dotenv import load_dotenv
-
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-OCR_API_KEY = os.getenv("K87990866288957") # Buni shunday qoldirsa ham bo'ladi
+OCR_API_KEY = os.getenv("OCR_API_KEY", "K87990866288957")
+
 # Supabase ulanish
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -48,23 +45,33 @@ VALID_KEYWORDS = ["5614", "6847", "07", "ELDOR", "ATAJANOV", "PAYME", "CLICK", "
 PRICE_KEYWORDS = ["narx", "qancha", "necha", "pul", "som", "so'm", "sum", "нарх", "қанча", "неча", "пул", "сўм", "сум"]
 
 # =========================================================================
-# OCR FUNKSIYASI (Sizning asl, ishlaydigan versiyangiz)
+# 2. OCR FUNKSIYASI (Base64 + Anti-Blok tizimi bilan)
 # =========================================================================
 def get_text_from_api(file_bytes, file_type='jpg'):
-    filename = 'file.pdf' if file_type == 'pdf' else 'file.jpg'
-    mime_type = 'application/pdf' if file_type == 'pdf' else 'image/jpeg'
+    # Rasmni fayl sifatida emas, maxfiy matn (base64) sifatida o'qiymiz (Bloklanmaslik uchun)
+    base64_data = base64.b64encode(file_bytes).decode('utf-8')
+    
+    if file_type == 'pdf':
+        base64_string = f"data:application/pdf;base64,{base64_data}"
+    else:
+        base64_string = f"data:image/jpeg;base64,{base64_data}"
 
     payload = {
         'apikey': OCR_API_KEY,
+        'base64Image': base64_string,  # Fayl o'rniga shu matn yuboriladi
         'language': 'eng',
         'isOverlayRequired': 'false',
         'OCREngine': '2' 
     }
-    
-    files = {'file': (filename, file_bytes, mime_type)}
+
+    # O'zimizni bot emas, haqiqiy brauzer qilib ko'rsatamiz
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/114.0.0.0 Safari/537.36'
+    }
 
     try:
-        response = requests.post('https://api.ocr.space/parse/image', files=files, data=payload, timeout=30)
+        # files= qismi olib tashlandi, timeout biroz oshirildi
+        response = requests.post('https://api.ocr.space/parse/image', data=payload, headers=headers, timeout=40)
         response.raise_for_status()
         result = response.json()
         
@@ -76,7 +83,7 @@ def get_text_from_api(file_bytes, file_type='jpg'):
         return "ERROR_API"
 
 # =========================================================================
-# KUNLARNI HISOBLASH (Faqat summaga qarab)
+# 3. KUNLARNI HISOBLASH (Faqat summaga qarab)
 # =========================================================================
 def calculate_tariff_days(text: str) -> int:
     raw_numbers = re.findall(r'\b\d{2}[.,\s]?\d{3}\b|\b\d{5,6}\b', text)
@@ -95,7 +102,7 @@ def calculate_tariff_days(text: str) -> int:
     return 7 
 
 # =========================================================================
-# USER YARATISH VA YANGILASH (Aqlli tizim)
+# 4. USER YARATISH VA YANGILASH (Aqlli tizim)
 # =========================================================================
 async def create_user_auto(email: str, tariff_days: int, message: Message, state: FSMContext):
     try:
@@ -158,7 +165,7 @@ async def create_user_auto(email: str, tariff_days: int, message: Message, state
         await message.answer(f"❌ Xatolik yuz berdi. Adminga murojaat qiling: {str(e)}")
 
 # =========================================================================
-# BOT LOGIKASI
+# 5. BOT LOGIKASI
 # =========================================================================
 @dp.message(F.text)
 @dp.business_message(F.text)
@@ -205,7 +212,7 @@ async def handle_text(message: Message, state: FSMContext):
     return
 
 # =========================================================================
-# FAYLLARNI QABUL QILISH
+# 6. FAYLLARNI QABUL QILISH
 # =========================================================================
 @dp.message(F.photo | F.document)
 @dp.business_message(F.photo | F.document)
@@ -227,7 +234,7 @@ async def handle_files(message: Message, state: FSMContext):
             full_text = await asyncio.to_thread(get_text_from_api, file_bytes, file_type)
             
             if full_text == "ERROR_API":
-                await msg.edit_text("❌ OCR serveri javob bermadi. Iltimos, bir ozdan so'ng qayta yuboring.")
+                await msg.edit_text("❌ OCR serveri bilan ulanishda muammo (API xatosi). Iltimos, bir ozdan so'ng qayta yuboring.")
                 return
 
             # Keywordlarni tekshirish (Katta-kichik harfni inobatga olib)
@@ -255,6 +262,9 @@ async def handle_files(message: Message, state: FSMContext):
         logging.error(f"Handle Files Error: {e}")
         await msg.edit_text("❌ Tizimda xatolik yuz berdi.")
 
+# =========================================================================
+# 7. BOTNI ISHGA TUSHIRISH
+# =========================================================================
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
