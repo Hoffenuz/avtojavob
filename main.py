@@ -12,6 +12,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
 
 # =========================================================================
@@ -37,6 +38,7 @@ logging.basicConfig(level=logging.INFO)
 class PaymentState(StatesGroup):
     waiting_for_check = State()
     waiting_for_email = State()
+    processing        = State()   # OCR/API ishida — takroriy xabar blok
     completed         = State()
 
 
@@ -46,18 +48,63 @@ VALID_KEYWORDS = ["5614", "6847", "07", "ELDOR", "ATAJANOV",
 PRICE_KEYWORDS = ["narx", "qancha", "necha", "pul", "som", "so'm", "sum",
                   "нарх", "қанча", "неча", "пул", "сўм", "сум"]
 
+# Xato soni chegarasi — bundan ko'p bo'lsa admin chaqiriladi va to'xtaydi
+ERROR_THRESHOLD = 3
+
 
 # =========================================================================
-# 3. PAROL HISOBLASH
-#    Edge Function bilan bir xil logika.
-#    Response dan OLINMAYDI — shu yerda hisoblanadi, hech yerda saqlanmaydi.
+# 3. XAVFSIZ XABAR TAHRIRLASH
+#    Foydalanuvchi xabarni o'chirgan bo'lsa crash bo'lmaydi —
+#    yangi xabar yuboriladi.
+# =========================================================================
+async def safe_edit(msg: Message, text: str) -> Message:
+    """Xabarni tahrirlashga urinadi; topilmasa yangi xabar yuboradi."""
+    try:
+        await msg.edit_text(text, parse_mode=ParseMode.HTML)
+        return msg
+    except TelegramBadRequest as e:
+        if "message to edit not found" in str(e).lower() \
+                or "message can't be edited" in str(e).lower():
+            return await msg.answer(text, parse_mode=ParseMode.HTML)
+        raise
+
+
+# =========================================================================
+# 4. XATO SCHETCHIGI — ko'p xato bo'lsa admin chaqiriladi
+# =========================================================================
+async def register_error(state: FSMContext, message: Message, err: Exception,
+                          context: str = "") -> bool:
+    """
+    Xatoni qayd etadi. ERROR_THRESHOLD dan oshsa:
+      - foydalanuvchiga admin chaqirilmoqda deydi
+      - True qaytaradi (caller to'xtashi kerak)
+    """
+    logging.error(f"[{context}] {err}")
+    data  = await state.get_data()
+    count = data.get("error_count", 0) + 1
+    await state.update_data(error_count=count)
+
+    if count >= ERROR_THRESHOLD:
+        await message.answer(
+            "⚠️ Tizimda muammo yuz berdi.\n"
+            "Admin xabardor qilindi, tez orada hal qilinadi.\n\n"
+            "Iltimos, bir oz kuting yoki keyinroq urinib ko'ring."
+        )
+        await state.clear()          # holatni tozalash
+        return True                  # to'xtash signali
+
+    return False                     # davom etish mumkin
+
+
+# =========================================================================
+# 5. PAROL HISOBLASH (Edge Function bilan bir xil logika)
 # =========================================================================
 def derive_password(email: str) -> str:
     return email.lower().strip().split("@")[0][:20]
 
 
 # =========================================================================
-# 4. EDGE FUNCTION CHAQIRUVI
+# 6. EDGE FUNCTION CHAQIRUVI
 # =========================================================================
 async def call_bot_manager(action: str, **kwargs) -> dict:
     payload = {"action": action, **kwargs}
@@ -72,7 +119,7 @@ async def call_bot_manager(action: str, **kwargs) -> dict:
 
 
 # =========================================================================
-# 5. OCR
+# 7. OCR (blokirovkasiz thread'da)
 # =========================================================================
 def get_text_from_api(file_bytes: bytes, file_type: str = 'jpg') -> str:
     b64    = base64.b64encode(file_bytes).decode('utf-8')
@@ -104,7 +151,7 @@ def get_text_from_api(file_bytes: bytes, file_type: str = 'jpg') -> str:
 
 
 # =========================================================================
-# 6. TARIF KUNLARI
+# 8. TARIF KUNLARI
 # =========================================================================
 def calculate_tariff_days(text: str) -> int:
     raw = re.findall(r'\b\d{2}[.,\s]?\d{3}\b|\b\d{5,6}\b', text)
@@ -120,7 +167,7 @@ def calculate_tariff_days(text: str) -> int:
 
 
 # =========================================================================
-# 7. USER YARATISH / YANGILASH
+# 9. USER YARATISH / YANGILASH
 # =========================================================================
 async def create_user_auto(email: str, tariff_days: int,
                             message: Message, state: FSMContext):
@@ -134,12 +181,12 @@ async def create_user_auto(email: str, tariff_days: int,
         if not result.get("success"):
             raise Exception(result.get("error", "Noma'lum xatolik"))
 
-        # Edge email ni kichik harfga o'tkazadi — uni ishlatamiz
         confirmed_email = result["email"]
         is_new_user     = result["is_new_user"]
+        password        = derive_password(confirmed_email)
 
-        # Parol response dan OLINMAYDI — bir xil logika bilan hisoblaymiz
-        password = derive_password(confirmed_email)
+        # Xato schetchikini tozalash — muvaffaqiyatli bo'ldi
+        await state.update_data(error_count=0)
 
         if is_new_user:
             await message.answer(
@@ -171,17 +218,23 @@ async def create_user_auto(email: str, tariff_days: int,
                 "⏳ Tizim hozir band. Bir daqiqadan so'ng qayta yuboring."
             )
         else:
-            logging.error(f"HTTP error: {e}")
-            await message.answer("❌ Xatolik yuz berdi. Adminga murojaat qiling.")
+            should_stop = await register_error(state, message, e, "HTTP")
+            if should_stop:
+                return
+            await message.answer(
+                "❌ Server bilan bog'lanishda muammo. Qayta urinib ko'ring."
+            )
     except Exception as e:
-        logging.error(f"create_user_auto error: {e}")
-        await message.answer(
-            f"❌ Xatolik yuz berdi. Adminga murojaat qiling.\n<code>{e}</code>"
-        )
+        should_stop = await register_error(state, message, e, "create_user")
+        if not should_stop:
+            await message.answer(
+                "❌ Xatolik yuz berdi. Qayta urinib ko'ring yoki "
+                "adminga murojaat qiling."
+            )
 
 
 # =========================================================================
-# 8. MATN HANDLERI
+# 10. MATN HANDLERI
 # =========================================================================
 @dp.message(F.text)
 @dp.business_message(F.text)
@@ -190,6 +243,14 @@ async def handle_text(message: Message, state: FSMContext):
     email_match   = re.search(EMAIL_REGEX, message.text)
     current_state = await state.get_state()
 
+    # --- Processing holatida — OCR ishlayapti, takroriy xabar rad qilinadi
+    if current_state == PaymentState.processing:
+        await message.answer(
+            "⏳ Chekingiz hali tekshirilmoqda, iltimos kuting..."
+        )
+        return
+
+    # --- Email keldi
     if email_match:
         email = email_match.group(0)
         if current_state == PaymentState.waiting_for_email:
@@ -197,25 +258,29 @@ async def handle_text(message: Message, state: FSMContext):
             tariff_days = data.get("tariff_days", 7)
             await message.answer("📧 Email qabul qilindi. User ochilmoqda...")
             await create_user_auto(email, tariff_days, message, state)
+        elif current_state == PaymentState.completed:
+            # Tugallangan holat — emailga javob bermaydi
+            pass
         else:
             await state.update_data(email=email)
-            if current_state != PaymentState.completed:
-                await state.set_state(PaymentState.waiting_for_check)
+            await state.set_state(PaymentState.waiting_for_check)
             await message.answer(
-                f"📧 Email ({email}) saqlandi. "
+                f"📧 Email <code>{email}</code> saqlandi.\n"
                 f"Endi to'lov cheki rasmini yuboring."
             )
         return
 
+    # --- Narx so'rovi
     if any(w in text for w in PRICE_KEYWORDS):
         await message.answer(
             "💰 <b>Avtotest Pro narxlari:</b>\n\n"
-            "• 1 haftalik: 15,000 so'm\n"
-            "• 1 oylik: 33,000 so'm\n"
-            "• 3 oylik: 83,000 so'm"
+            "• 1 haftalik — 15,000 so'm\n"
+            "• 1 oylik — 33,000 so'm\n"
+            "• 3 oylik — 83,000 so'm"
         )
         return
 
+    # --- Birinchi murojaat (holat yo'q)
     if current_state is None:
         await message.answer(
             "Assalomu alaykum! Pro versiyani olish uchun to'lov qiling:\n\n"
@@ -223,44 +288,79 @@ async def handle_text(message: Message, state: FSMContext):
             "👤 <b>Eldor Atajanov</b>\n\n"
             "❗️ To'lovdan so'ng <b>Chek</b> va <b>Emailni</b> yuboring."
         )
-        await asyncio.sleep(0.5)
-        await message.answer("Boshqa masalada admin javobini kuting. 👨‍💻")
+        await asyncio.sleep(0.3)
+        await message.answer(
+            "Boshqa masalada savollaringiz bo'lsa yozib qoldiring. 📝"
+        )
         await state.set_state(PaymentState.waiting_for_check)
+        return
+
+    # --- Boshqa holatda kelgan noma'lum matn — jim turadi
 
 
 # =========================================================================
-# 9. FAYL / RASM HANDLERI
+# 11. FAYL / RASM HANDLERI
 # =========================================================================
 @dp.message(F.photo | F.document)
 @dp.business_message(F.photo | F.document)
 async def handle_files(message: Message, state: FSMContext):
-    msg        = await message.answer("⏳ Chek tekshirilmoqda, iltimos kuting...")
-    file_bytes = None
-    file_type  = 'jpg'
+    current_state = await state.get_state()
+
+    # --- Allaqachon ishlanayapti — ikkinchi rasm/fayl rad qilinadi
+    if current_state == PaymentState.processing:
+        await message.answer(
+            "⏳ Oldingi chekingiz hali tekshirilmoqda, kuting..."
+        )
+        return
+
+    # --- Tugallangan holat — chek endi kerak emas
+    if current_state == PaymentState.completed:
+        return
+
+    # --- Faqat rasm yoki PDF qabul qilinadi
+    is_photo = bool(message.photo)
+    is_pdf   = (
+        message.document
+        and message.document.file_name
+        and message.document.file_name.lower().endswith('.pdf')
+    )
+
+    if not is_photo and not is_pdf:
+        await message.answer("⚠️ Faqat rasm yoki PDF formatida yuboring.")
+        return
+
+    # --- Processing holatiga o'tkazish (takroriy yuborishni bloklash)
+    await state.set_state(PaymentState.processing)
+    msg = await message.answer("⏳ Chek tekshirilmoqda, iltimos kuting...")
 
     try:
-        if message.photo:
-            file       = await bot.get_file(message.photo[-1].file_id)
-            file_bytes = (await bot.download_file(file.file_path)).read()
-        elif (message.document
-              and message.document.file_name.lower().endswith('.pdf')):
-            file       = await bot.get_file(message.document.file_id)
-            file_bytes = (await bot.download_file(file.file_path)).read()
-            file_type  = 'pdf'
+        # Faylni yuklab olish
+        if is_photo:
+            file      = await bot.get_file(message.photo[-1].file_id)
+            file_type = 'jpg'
+        else:
+            file      = await bot.get_file(message.document.file_id)
+            file_type = 'pdf'
 
-        if not file_bytes:
-            await msg.edit_text("⚠️ Rasm yoki PDF formatida yuboring.")
-            return
+        file_bytes = (await bot.download_file(file.file_path)).read()
 
+        # OCR — blokirovkasiz thread'da
         full_text = await asyncio.to_thread(
             get_text_from_api, file_bytes, file_type
         )
 
         if full_text == "ERROR_API":
-            await msg.edit_text(
-                "❌ OCR serveri bilan ulanishda muammo. "
-                "Iltimos, bir ozdan so'ng qayta yuboring."
+            should_stop = await register_error(
+                state, message,
+                Exception("OCR API javob bermadi"), "OCR"
             )
+            if not should_stop:
+                await safe_edit(msg,
+                    "❌ Chek o'qishda muammo yuz berdi.\n"
+                    "Iltimos, biroz kutib, qayta yuboring."
+                )
+                # Oldingi holatga qaytarish
+                await state.set_state(PaymentState.waiting_for_check)
             return
 
         is_valid = any(w in full_text.upper() for w in VALID_KEYWORDS)
@@ -271,28 +371,42 @@ async def handle_files(message: Message, state: FSMContext):
             email = data.get("email")
 
             if email:
-                await msg.edit_text("✅ Chek tasdiqlandi! Profil yaratilmoqda...")
+                await safe_edit(msg, "✅ Chek tasdiqlandi! Profil yaratilmoqda...")
                 await create_user_auto(email, calculated_days, message, state)
             else:
                 await state.update_data(tariff_days=calculated_days)
                 await state.set_state(PaymentState.waiting_for_email)
-                await msg.edit_text(
-                    "✅ Chek qabul qilindi! "
+                await safe_edit(
+                    msg,
+                    "✅ Chek qabul qilindi!\n\n"
                     "Endi <b>Email manzilingizni</b> yozib yuboring."
                 )
         else:
-            await msg.edit_text(
-                "⚠️ Chekni o'qib bo'lmadi yoki xato chek yuborildi. "
-                "Iltimos, tiniqroq rasm yuboring."
+            # Noto'g'ri chek — holatni tiklash
+            await state.set_state(PaymentState.waiting_for_check)
+            await safe_edit(
+                msg,
+                "⚠️ Chekni o'qib bo'lmadi yoki noto'g'ri chek yuborildi.\n\n"
+                "Iltimos, <b>aniqroq</b> rasm yuboring."
             )
 
+    except TelegramBadRequest as e:
+        # Telegram xatosi — holatni tiklash, crash yo'q
+        logging.warning(f"Telegram API xatosi: {e}")
+        await state.set_state(PaymentState.waiting_for_check)
+
     except Exception as e:
-        logging.error(f"handle_files error: {e}")
-        await msg.edit_text("❌ Tizimda xatolik yuz berdi.")
+        should_stop = await register_error(state, message, e, "handle_files")
+        if not should_stop:
+            try:
+                await safe_edit(msg, "❌ Tizimda xatolik. Qayta urinib ko'ring.")
+            except Exception:
+                pass
+            await state.set_state(PaymentState.waiting_for_check)
 
 
 # =========================================================================
-# 10. ISHGA TUSHIRISH
+# 12. ISHGA TUSHIRISH
 # =========================================================================
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
